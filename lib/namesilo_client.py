@@ -88,7 +88,6 @@ class NameSiloClient:
 
     def _list_dns_api(self, domain: dict, cache: dict = {}, t: str = 'A') -> None:
         """
-
         :param domain: 直接对字典进行读取和修改操作，无返回值
         :param cache: 缓存空间，可以由调用者负责提供和清空
         :param t: type, 记录类型，支持A和AAAA
@@ -104,30 +103,49 @@ class NameSiloClient:
                                        'configuration file error, or the NameSilo server error.')
                     sys.exit(-1)
                 ro = ro.text
+            
             r = ro.split('<resource_record>')
-            _domain = domain['domain'] if domain['host'] == '@' or \
-                                          domain['host'] == '' else f"{domain['host']}.{domain['domain']}"
+            # --- 核心修复逻辑 ---
+            # NameSilo API 对于子域名只返回主机名部分（如 'home'），而不是全域名
+            # 获取配置中的主机目标：如果为空或为 @，则 target_host 设为 @
+            target_host = domain['host'] if (domain['host'] and domain['host'] != '@') else '@'
+            
+            target_record = None
             for record in r:
-                if record.find(f'<host>{_domain}</host>') != -1 and record.find(f'<type>{t}</type>') != -1:
-                    r = record
+                # 提取 <host> 标签内容
+                if '<host>' not in record or '<type>' not in record:
+                    continue
+                
+                api_host = record.split('<host>')[1].split('</host>')[0]
+                api_type = record.split('<type>')[1].split('</type>')[0]
+                
+                # 匹配主机名且匹配记录类型 (A/AAAA)
+                if api_host == target_host and api_type == t:
+                    target_record = record
                     break
-            if type(r) == list:
-                # 上方循环到最后也未匹配，未赋值
-                self._logger.error(f'\tResponse content error, or the domain name {_domain} in the configuration file '
-                                   f'does not match the data of the namesilo server\n{ro}')
+            
+            if target_record is None:
+                # 依然没找到，触发报错
+                self._logger.error(f'\tResponse content error, or the host "{target_host}" '
+                                   f'for domain "{domain["domain"]}" does not match NameSilo data.\n{ro}')
                 raise Exception("Response error or configuration file error")
-            r = r.split('</record_id>')
+            
+            # 恢复逻辑执行
+            r = target_record.split('</record_id>')
             domain['record_id'] = r[0].split('<record_id>')[-1]
             domain['domain_ip'] = r[1].split('<value>')[1].split('</value>')[0]
+            
             self._logger.info(
-                f"\t'{domain['host']}{'.' if domain['host'] else ''}{domain['domain']}' "
+                f"\t{domain['host']}{'.' if domain['host'] else ''}{domain['domain']} "
                 f"resolution ip: {domain['domain_ip']}")
+                
         except AttributeError as e:
             self._logger.error(f'\tResponse content error\n{ro}')
             raise
-        except httpx.ConnectError as e:
-            self._logger.error('\tError, process stopped. '
-                               'It could be due to the configuration file error, or the NameSilo server error.')
+        except Exception as e:
+            # 捕获其他潜在异常并向上抛出
+            if "Response error" not in str(e):
+                self._logger.error(f'\tUnexpected error: {str(e)}')
             raise
 
     def update_domain_ip(self, new_ip=None, new_ipv6=None) -> int:
